@@ -1,0 +1,219 @@
+esphome:
+  name: esp32c3mini-weishaupt
+  friendly_name: Weishaupt WTC-GW 15-B
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  # Verhindert, dass der Logger überhaupt Log-Nachrichten an MQTT schickt
+  level: DEBUG # Lokal (USB/Web) darf er ruhig noch debuggen
+  logs:
+    mqtt: NONE       # Schaltet das MQTT-Logging-Backend komplett aus
+    mqtt.client: NONE
+    mqtt.component: NONE
+    canbus: ERROR    # Falls du CAN-Fehler zumindest intern sehen willst
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "HIER DEIN TOKEN EINFÜGEN"
+
+ota:
+  - platform: esphome
+    password: "HIER DEIN PASSWORT EINTRAGEN"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  use_address: 192.168.68.12 # UNTER DIESER IP SUCHT ESP-HOME DAS GERÄT WENN KEIN mDNS MÖGLICH
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Weishaupt-Wtc-Gw-15-B"
+    password: "HIER DEIN PASSWORT EINTRAGEN"
+
+captive_portal:
+
+mqtt:
+  broker: mosquitto.home.arpa # HIER DEINE BROKER ADRESSE EINTRAGEN
+  port: 8883
+#  topic_prefix: heizung/wem
+  # Deaktiviert das Senden von Log-Nachrichten an MQTT
+#  log_topic: null
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  certificate_authority: |-
+      -----BEGIN CERTIFICATE-----
+      
+      HIER DEIN ZERTIFIKAT EINTRAGEN WENN VORHANDEN
+      
+      -----END CERTIFICATE-----
+
+ # CAN Bus Konfiguration (TWAI)
+canbus:
+  - platform: esp32_can
+    id: my_can_bus
+    can_id: 0x602
+    tx_pin: GPIO6
+    rx_pin: GPIO7
+    bit_rate: 50kbps
+    on_frame:
+      # --- 1. PDO Verarbeitung (Cyclic Map) ---
+      - can_id: 0x201
+        then:
+          - lambda: |-
+              id(wem_aussentemp).publish_state((int16_t(x[2] << 8 | x[1])) * 0.1f);
+      
+      - can_id: 0x241
+        then:
+          - lambda: |- 
+              id(wem_heizanforderung).publish_state((int16_t(x[1] << 8 | x[0])) * 0.1f);
+              id(wem_warmwasser).publish_state((int16_t(x[7] << 8 | x[6])) * 0.1f);
+
+      # --- 2. SDO Antworten (ID 0x582) ---
+      - can_id: 0x582
+        then:
+          - lambda: |-
+              uint16_t idx = (x[2] << 8) | x[1];
+              uint8_t sub = x[3];
+              int32_t raw_val = (int32_t)((uint32_t)x[7] << 24 | (uint32_t)x[6] << 16 | (uint32_t)x[5] << 8 | (uint32_t)x[4]);
+
+              if (idx == 0x2714 && sub == 0x02) id(wem_druck).publish_state(raw_val * 0.01f);
+              else if (idx == 0x2534) id(wem_leistung).publish_state(raw_val * 0.01f);
+              else if (idx == 0x2540) id(wem_drehzahl).publish_state((float)raw_val);
+              else if (idx == 0x2536) id(wem_vorlauf).publish_state(raw_val * 0.1f);
+              else if (idx == 0x2533 && sub == 0x02) id(wem_ruecklauf).publish_state(raw_val * 0.1f);
+              else if (idx == 0x2713 && sub == 0x02) id(wem_volumenstrom).publish_state((float)raw_val);
+              else if (idx == 0x2726) id(wem_wm_heizung).publish_state(raw_val * 0.01f);
+              else if (idx == 0x2727) id(wem_wm_ww).publish_state(raw_val * 0.01f);
+              else if (idx == 0x2728) id(wem_wm_gesamt).publish_state(raw_val * 0.01f);
+
+sensor:
+  # SDO Sensoren (Werte werden via on_frame empfangen)
+  - platform: template
+    name: "Anlagendruck"
+    id: wem_druck
+    unit_of_measurement: "bar"
+    device_class: "pressure"
+    update_interval: never
+
+  - platform: template
+    name: "Leistung"
+    id: wem_leistung
+    unit_of_measurement: "%"
+    device_class: "power_factor"
+    update_interval: never
+
+  - platform: template
+    name: "Drehzahl"
+    id: wem_drehzahl
+    unit_of_measurement: "U/min"
+    update_interval: never
+
+  - platform: template
+    name: "Vorlauf"
+    id: wem_vorlauf
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    update_interval: never
+
+  - platform: template
+    name: "Ruecklauf"
+    id: wem_ruecklauf
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    update_interval: never
+
+  - platform: template
+    name: "Volumenstrom"
+    id: wem_volumenstrom
+    unit_of_measurement: "l/h"
+    update_interval: never
+
+  - platform: template
+    name: "Wärmemenge Vortag Heizung"
+    id: wem_wm_heizung
+    unit_of_measurement: "kWh"
+    device_class: "energy"
+    state_class: "total_increasing"
+    update_interval: never
+
+  - platform: template
+    name: "Wärmemenge Vortag WW"
+    id: wem_wm_ww
+    unit_of_measurement: "kWh"
+    device_class: "energy"
+    state_class: "total_increasing"
+    update_interval: never
+
+  - platform: template
+    name: "Wärmemenge Vortag Gesamt"
+    id: wem_wm_gesamt
+    unit_of_measurement: "kWh"
+    device_class: "energy"
+    state_class: "total_increasing"
+    update_interval: never
+
+  # PDO Sensoren (Passiv)
+  - platform: template
+    name: "Aussentemperatur"
+    id: wem_aussentemp
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    update_interval: never
+
+  - platform: template
+    name: "Heizanforderung"
+    id: wem_heizanforderung
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    update_interval: never
+
+  - platform: template
+    name: "Warmwasser"
+    id: wem_warmwasser
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    update_interval: never
+
+# Zeitgesteuerte SDO Abfragen (Poller)
+interval:
+  - interval: 120s
+    then:
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x14, 0x27, 0x02, 0x00, 0x00, 0x00, 0x00] # Anlagendruck
+  - interval: 5s
+    then:
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x34, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00] # Leistung
+  - interval: 10s
+    then:
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x40, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00] # Drehzahl
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x36, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00] # Vorlauf
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x33, 0x25, 0x02, 0x00, 0x00, 0x00, 0x00] # Ruecklauf
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x13, 0x27, 0x02, 0x00, 0x00, 0x00, 0x00] # Volumenstrom
+  - interval: 3600s
+    then:
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x26, 0x27, 0x02, 0x00, 0x00, 0x00, 0x00] # WM Heizung
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x27, 0x27, 0x02, 0x00, 0x00, 0x00, 0x00] # WM WW
+      - canbus.send:
+          can_id: 0x602
+          data: [0x40, 0x28, 0x27, 0x02, 0x00, 0x00, 0x00, 0x00] # WM Gesamt
